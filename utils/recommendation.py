@@ -1,67 +1,105 @@
-# pip install openai-whisper, openai, spacy, yt-dlp, youtube-dl, pafy
-# brew install ffmpeg -> bash 셀에서 해야함 (pip으로 하면 안됌, 하단 부분 터미널 주의(zsh 말고 bash))
-import os
-import pandas as pd
+import json
+import faiss
+import numpy as np
 import whisper
-import openai, spacy, yt_dlp
-from IPython.display import Audio
-from spacy.lang.ko.examples import sentences
-import pafy
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.llms import OpenAI
-from config import FILE_DIR, API_KEY, PAFY_KEY
-from utils.common import load_pdf_to_text, summarize_text, safe_video, extract_video_text, vectorize_text, find_similar_videos
+import yt_dlp
+import pandas as pdㅌ
+from sentence_transformers import SentenceTransformer
+from pymongo import MongoClient
 
-pafy_key = PAFY_KEY
-api_key = API_KEY
-pafy.set_api_key(PAFY_KEY)
+# 1. 유튜브 영상 데이터 (JSON 파일로 저장) -> 썸네일 이미지는 프론트엔드에서 id로 생성
+youtube_data = [
+    {"id": 1, "title": "14년차 UX/UI 디자이너가 말하는 절대 피해야하는 탈락각 포트폴리오", "url": "https://youtu.be/uYjXlhrHr_4?si=yoquZuSIMKibBA5c", "video_id": "uYjXlhrHr_4"},
+    {"id": 2, "title": "Machine Learning Basics", "url": "https://youtu.be/abc456", "video_id": "abc456"},
+    {"id": 3, "title": "Introduction to MongoDB", "url": "https://youtu.be/mongo789", "video_id": "mongo789"},
+    {"id": 3, "title": "Introduction to MongoDB", "url": "https://youtu.be/mongo789", "video_id": "mongo789"},
+    {"id": 3, "title": "Introduction to MongoDB", "url": "https://youtu.be/mongo789", "video_id": "mongo789"},
+    {"id": 3, "title": "Introduction to MongoDB", "url": "https://youtu.be/mongo789", "video_id": "mongo789"},
+    {"id": 3, "title": "Introduction to MongoDB", "url": "https://youtu.be/mongo789", "video_id": "mongo789"},
+    {"id": 3, "title": "Introduction to MongoDB", "url": "https://youtu.be/mongo789", "video_id": "mongo789"},
+    {"id": 3, "title": "Introduction to MongoDB", "url": "https://youtu.be/mongo789", "video_id": "mongo789"},
+    {"id": 3, "title": "Introduction to MongoDB", "url": "https://youtu.be/mongo789", "video_id": "mongo789"},
+    {"id": 3, "title": "Introduction to MongoDB", "url": "https://youtu.be/mongo789", "video_id": "mongo789"}
+]
 
-# 비디오 mp3로 저장
-def safe_video(self):
-    url = "https://www.youtube.com/watch?v=vjiUBshORo8"
+
+with open("youtube_data.json", "w") as f:
+    json.dump(youtube_data, f, indent=4)
+
+# 2. 텍스트 임베딩 및 벡터 DB 구축
+model = SentenceTransformer('all-MiniLM-L6-v2')
+video_titles = [video["title"] for video in youtube_data]
+embeddings = model.encode(video_titles, convert_to_numpy=True)
+
+# FAISS 벡터 데이터베이스 생성 및 삽입
+d = embeddings.shape[1]
+index = faiss.IndexFlatL2(d)
+index.add(embeddings)
+
+# 3. 유사도 검색 함수 (사용자 입력에 대한 추천)
+def search_videos(query, top_k=3):
+    query_embedding = model.encode([query], convert_to_numpy=True)
+    D, I = index.search(query_embedding, top_k)
+    results = [youtube_data[i] for i in I[0]]
+    return results
+
+# 4. MongoDB 연동 (이력서 데이터 저장 및 검색)
+client = MongoClient("mongodb://localhost:27017/")
+db = client["resume_db"]
+collection = db["resumes"]
+
+resume_data = {"name": "Ari Kim", "skills": ["Python", "Machine Learning", "MongoDB"]}
+collection.insert_one(resume_data)
+
+def get_resume(name):
+    return collection.find_one({"name": name})
+
+# 5. 비디오 오디오 추출 및 텍스트 변환
+def save_video_audio(url, filename):
     ydl_opts = {
-        'format': 'bestaudio/best',  # 최고 품질 오디오 선택
-        'outtmpl': 'hyundaimobis.mp3',  # 파일명 지정
-        'postprocessors': [{  # MP3로 변환
+        'format': 'bestaudio/best',
+        'outtmpl': filename,
+        'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
-            'preferredquality': '192',  # 음질 설정 (128, 192, 320kbps)
+            'preferredquality': '192',
         }]
     }
-
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
-# mp3에서 텍스트 추출
-def extract_video_text(self):
-    model = whisper.load_model("large") # Large 모델 불러오기
-    result = model.transcribe("hyundaimobis.mp3") # MP3 파일에서 추출
-    output = result["text"] # 추출된 텍스트 출력
-    print(output)
+def extract_video_text(audio_file):
+    model = whisper.load_model("large")
+    result = model.transcribe(audio_file)
+    return result["text"]
 
+# 6. 이력서 기반 추천 시스템
 class RecommendVideo:
     def __init__(self, token: str, video_database: pd.DataFrame, top_n=6):
         self.token = token 
         self.video_database = video_database
         self.top_n = top_n
-        self.resume_text = self._extract_resume_text(token)     # token 값을 입력하면 자동으로 해당 토큰의 PDF 불러오기
-        self.resume_vector = vectorize_text(self.resume_text)
+        self.resume_text = self._extract_resume_text()
+        self.resume_vector = model.encode([self.resume_text], convert_to_numpy=True)
     
     def _extract_resume_text(self):
-        if not os.path.exists(self.resume_path):
-            raise FileNotFoundError("해당 경로에 이력서 파일이 존재하지 않습니다.")
-        resume_text = load_pdf_to_text(self.resume_path)
-        return summarize_text(resume_text, max_length=1500)
+        resume_data = get_resume(self.token)
+        return " ".join(resume_data["skills"])
     
     def recommend_videos(self):
-        video_vectors = self.video_database['transcript'].apply(vectorize_text)
-        recommendations = find_similar_videos(self.resume_vector, video_vectors, self.top_n)
-        return self.video_database.iloc[recommendations]
-    
+        video_vectors = np.array([model.encode([video["title"]], convert_to_numpy=True) for video in youtube_data])
+        D, I = index.search(self.resume_vector, self.top_n)
+        recommendations = [youtube_data[i] for i in I[0]]
+        return recommendations
+
+# 7. 실행 테스트
 if __name__ == "__main__":
-    video_database_df = pd.read_csv("video_database.csv")  # 예제 영상 데이터
-    resume_file_path = "user_resume.pdf"
-    recommender = RecommendVideo(resume_file_path, video_database_df)
-    recommended_videos = recommender.recommend_videos()
-    print(recommended_videos)
+    user_query = "Python programming"
+    recommended_videos = search_videos(user_query)
+    print("Recommended Videos:", recommended_videos)
+    
+    resume = get_resume("Ari Kim")
+    print("Resume Data:", resume)
+    
+    recommender = RecommendVideo("Ari Kim", pd.DataFrame(youtube_data))
+    print("Recommended Videos based on Resume:", recommender.recommend_videos())
